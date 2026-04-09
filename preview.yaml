@@ -1,0 +1,90 @@
+tables:
+- name: request_logs
+  instanceName: bigots
+  primaryKeys:
+  - name: yyyymmddhh
+    type: INTEGER
+  - name: request_id
+    type: STRING
+  - name: timestamp
+    type: INTEGER
+  definedColumns:
+  - name: client_ip
+    type: STRING
+  - name: method
+    type: STRING
+  - name: path
+    type: STRING
+  - name: headers
+    type: STRING
+  - name: user_agent
+    type: STRING
+  - name: content_length
+    type: INTEGER
+  - name: process_logs
+    type: STRING
+  - name: status_code
+    type: INTEGER
+  - name: latency_ms
+    type: INTEGER
+  - name: error_message
+    type: STRING
+  - name: end_timestamp
+    type: INTEGER
+- name: server_log
+  instanceName: bigots
+  primaryKeys:
+  - name: yyyymmddhh
+    type: INTEGER
+  - name: request_id
+    type: STRING
+  - name: time
+    type: INTEGER
+  definedColumns:
+  - name: url
+    type: STRING
+  - name: request_data_json
+    type: STRING
+  - name: status
+    type: INTEGER
+  - name: ua
+    type: STRING
+  - name: response_data_json
+    type: STRING
+  - name: machine_code
+    type: STRING
+  - name: ip
+    type: STRING
+- name: task_log
+  instanceName: bigots
+  primaryKeys:
+  - name: task_id
+    type: STRING
+  - name: timestamp
+    type: INTEGER
+  definedColumns:
+  - name: log_type
+    type: STRING
+  - name: log_level
+    type: STRING
+  - name: message
+    type: STRING
+  - name: meta_data_json
+    type: STRING
+  indexes:
+  - name: task_log_index_level
+    primaryKeys:
+    - name: task_id
+      type: STRING
+    - name: log_level
+      type: STRING
+    - name: timestamp
+      type: INTEGER
+    definedColumns:
+    - name: message
+      type: STRING
+    - name: log_type
+      type: STRING
+    - name: meta_data_json
+      type: STRING
+    includeBaseData: false

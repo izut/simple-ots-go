@@ -1,0 +1,239 @@
+tables:
+- name: request_logs
+  instanceName: bigots
+  primaryKeys:
+  - name: yyyymmddhh
+    type: INTEGER
+  - name: request_id
+    type: STRING
+  - name: timestamp
+    type: INTEGER
+  definedColumns:
+  - name: client_ip
+    type: STRING
+  - name: method
+    type: STRING
+  - name: path
+    type: STRING
+  - name: headers
+    type: STRING
+  - name: user_agent
+    type: STRING
+  - name: content_length
+    type: INTEGER
+  - name: process_logs
+    type: STRING
+  - name: status_code
+    type: INTEGER
+  - name: latency_ms
+    type: INTEGER
+  - name: error_message
+    type: STRING
+  - name: end_timestamp
+    type: INTEGER
+- name: server_log
+  instanceName: bigots
+  primaryKeys:
+  - name: yyyymmddhh
+    type: INTEGER
+  - name: request_id
+    type: STRING
+  - name: time
+    type: INTEGER
+  definedColumns:
+  - name: url
+    type: STRING
+  - name: request_data_json
+    type: STRING
+  - name: status
+    type: INTEGER
+  - name: ua
+    type: STRING
+  - name: response_data_json
+    type: STRING
+  - name: machine_code
+    type: STRING
+  - name: ip
+    type: STRING
+- name: task_log
+  instanceName: bigots
+  primaryKeys:
+  - name: task_id
+    type: STRING
+  - name: timestamp
+    type: INTEGER
+  definedColumns:
+  - name: log_type
+    type: STRING
+  - name: log_level
+    type: STRING
+  - name: message
+    type: STRING
+  - name: meta_data_json
+    type: STRING
+  indexes:
+  - name: task_log_index_level
+    indexType: local
+    primaryKeys:
+    - name: task_id
+      type: STRING
+    - name: log_level
+      type: STRING
+    - name: timestamp
+      type: INTEGER
+    definedColumns:
+    - name: message
+      type: STRING
+    - name: log_type
+      type: STRING
+    - name: meta_data_json
+      type: STRING
+    includeBaseData: true
+- name: company_profile
+  instanceName: tec05
+  primaryKeys:
+  - name: cid
+    type: STRING
+  - name: id_type
+    type: STRING
+  - name: id
+    type: STRING
+  definedColumns:
+  - name: company_name
+    type: STRING
+  - name: tax_id
+    type: STRING
+  - name: admin_ids_json
+    type: STRING
+  - name: address
+    type: STRING
+  - name: contact_phone
+    type: STRING
+  - name: certificate
+    type: int
+  - name: logo
+    type: STRING
+  - name: pay_type
+    type: STRING
+  - name: role_name
+    type: STRING
+  - name: role_type
+    type: STRING
+  - name: description
+    type: STRING
+  - name: permissions_json
+    type: STRING
+  - name: status
+    type: INTEGER
+  - name: created_at
+    type: INTEGER
+  - name: updated_at
+    type: INTEGER
+- name: company_user
+  instanceName: tec05
+  primaryKeys:
+  - name: cid
+    type: STRING
+  - name: user_id
+    type: STRING
+  definedColumns:
+  - name: role
+    type: STRING
+  - name: status
+    type: STRING
+  - name: joined_at
+    type: INTEGER
+  - name: department
+    type: STRING
+  - name: created_at
+    type: INTEGER
+  - name: updated_at
+    type: INTEGER
+- name: configs
+  instanceName: tec05
+  primaryKeys:
+  - name: key
+    type: STRING
+  definedColumns:
+  - name: value
+    type: STRING
+  - name: type
+    type: STRING
+  - name: category
+    type: STRING
+  - name: remark
+    type: STRING
+  - name: updated_at
+    type: INTEGER
+  - name: updated_by
+    type: STRING
+- name: unique
+  instanceName: tec05
+  primaryKeys:
+  - name: value
+    type: STRING
+  definedColumns:
+  - name: target_type
+    type: STRING
+  - name: target
+    type: STRING
+  - name: extra_info
+    type: STRING
+  - name: created_at
+    type: INTEGER
+  - name: updated_at
+    type: INTEGER
+- name: user
+  instanceName: tec05
+  primaryKeys:
+  - name: uid
+    type: STRING
+  definedColumns:
+  - name: user_name
+    type: STRING
+  - name: email
+    type: STRING
+  - name: cell_phone
+    type: STRING
+  - name: avatar
+    type: STRING
+  - name: gender
+    type: STRING
+  - name: status
+    type: INTEGER
+  - name: role
+    type: STRING
+  - name: last_login_at
+    type: INTEGER
+  - name: last_login_ip
+    type: STRING
+  - name: created_at
+    type: INTEGER
+  - name: updated_at
+    type: INTEGER
+  - name: email_check_status
+    type: INTEGER
+  - name: cell_phone_check_status
+    type: INTEGER
+- name: user_password
+  instanceName: tec05
+  primaryKeys:
+  - name: uid
+    type: STRING
+  definedColumns:
+  - name: password
+    type: STRING
+  - name: must_change_pwd
+    type: INTEGER
+  - name: password_changed
+    type: INTEGER
+  - name: history_passwords_json
+    type: STRING
+  - name: password_changed_at
+    type: INTEGER
+  - name: password_expire_at
+    type: INTEGER
+  - name: FailedAttempts
+    type: INTEGER
+  - name: LockedUntil
+    type: INTEGER
