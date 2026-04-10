@@ -102,6 +102,29 @@ go run ./cmd/sync_tables -push
 
 查看命令行帮助：`go run ./cmd/sync_tables --help`（亦支持 `-h`、`-help`）
 
+### 在任意项目直接使用已发布版本
+
+如果你不在本仓库目录，也可以直接使用发布 tag 的 `sync_tables`。
+
+方式一：安装后长期使用（推荐）
+
+```bash
+go install github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha
+sync_tables -push -config ./config/tables.yaml
+```
+
+方式二：不安装，按版本单次运行
+
+```bash
+go run github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha -push -config ./config/tables.yaml
+```
+
+说明：
+
+- 以上命令中的 `v1.0.alpha` 可替换为你要使用的发布 tag
+- `-config` 路径相对于当前执行目录；不传时默认 `./config/tables.yaml`
+- 环境变量要求与本仓库内运行一致（如 `TABLESTORE_ACCESS_KEY_ID/SECRET`、`TABLESTORE_AREA` 等）
+
 常用参数：
 
 - `-push`：推送到远程（与 `-pull` 二选一，**必选其一**）
