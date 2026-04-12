@@ -10,9 +10,11 @@ import (
 
 // TableConfig 描述单张表的配置定义。
 // 该结构与 tables.yaml 中每个 tables 元素一一对应。
+// RegionId 为地域 ID（如 cn-hangzhou），YAML 键名为 regionId；未设置且未显式配置 TABLESTORE_ENDPOINT 时无法在运行时拼接 endpoint。
 type TableConfig struct {
 	Name           string          `yaml:"name"`
 	InstanceName   string          `yaml:"instanceName"`
+	RegionId       string          `yaml:"regionId,omitempty"`
 	PrimaryKeys    []PrimaryKey    `yaml:"primaryKeys"`
 	DefinedColumns []DefinedColumn `yaml:"definedColumns"`
 	Indexes        []Index         `yaml:"indexes,omitempty"`

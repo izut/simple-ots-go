@@ -1,4 +1,4 @@
-package simpleotsgo
+package otscore
 
 import (
 	"encoding/json"

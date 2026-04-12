@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/aliyun/aliyun-tablestore-go-sdk/v5/tablestore"
-	"github.com/izut/simple-ots-go"
+	sog "github.com/izut/simple-ots-go"
 	"github.com/izut/simple-ots-go/config"
 	"gopkg.in/yaml.v2"
 )
@@ -23,6 +23,7 @@ import (
 // 当用户通过 -table 传入索引名时，会解析为该结构并走 CreateIndex 流程。
 type indexSyncTask struct {
 	InstanceName string
+	RegionId     string // 与 tables.yaml 中 regionId 一致，用于拼接 endpoint
 	MainTable    config.TableConfig
 	Index        config.Index
 }
@@ -40,8 +41,12 @@ func main() {
 	configPathFlag := flag.String("config", "", "tables.yaml 路径（默认 SIMPLEOTSGO_TABLES_PATH 或 ./config/tables.yaml）")
 	// instancesFlag 逗号分隔实例名。拉取模式下若本地无配置，可通过该参数指定实例。
 	instancesFlag := flag.String("instances", "", "拉取模式可选：逗号分隔实例名，如 tec05,tec06")
+	// instanceFlag 为单实例别名，等价于 -instances 的单值形式，便于命令行直觉使用。
+	instanceFlag := flag.String("instance", "", "拉取模式可选：单个实例名（等价 -instances <name>）")
 	// dryRunFlag 为 true 时不改远程、不写文件：推送仅校验并 DescribeTable 演练（预定义列 / 缺失索引）；拉取将 YAML 打到标准输出。
 	dryRunFlag := flag.Bool("dry-run", false, "演练模式：不写远程、不写文件；拉取时 YAML 输出到 stdout")
+	// regionIdFlag 仅在拉取模式使用：当本地 YAML 某实例尚无 regionId 时，用于拼接 endpoint 并写入拉取结果（空 YAML + -instances 引导时必需，除非已设 TABLESTORE_ENDPOINT）。
+	regionIdFlag := flag.String("regionId", "", "拉取可选：地域 ID（如 cn-hangzhou）；本地未配置该实例 regionId 时生效")
 
 	// 注册帮助后设置 Usage，便于 flag.PrintDefaults 列出全部选项。
 	flag.Usage = printSyncTablesHelp
@@ -60,9 +65,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	if strings.TrimSpace(*instanceFlag) != "" {
+		if strings.TrimSpace(*instancesFlag) != "" {
+			log.Fatal("[sync_tables] 不能同时使用 -instance 与 -instances，请只保留一个")
+		}
+		*instancesFlag = strings.TrimSpace(*instanceFlag)
+	}
+
 	cfgPath := strings.TrimSpace(*configPathFlag)
 	if cfgPath == "" {
-		cfgPath = simpleotsgo.DefaultTablesConfigPath()
+		cfgPath = sog.DefaultTablesConfigPath()
 	}
 	log.Printf("[sync_tables] 配置文件：%s", cfgPath)
 	if *dryRunFlag {
@@ -75,7 +87,7 @@ func main() {
 	}
 
 	if *pullFlag {
-		if err := pullRemoteToLocal(cfgPath, strings.TrimSpace(*tableFlag), strings.TrimSpace(*instancesFlag), accessKeyID, secret, *dryRunFlag); err != nil {
+		if err := pullRemoteToLocal(cfgPath, strings.TrimSpace(*tableFlag), strings.TrimSpace(*instancesFlag), strings.TrimSpace(*regionIdFlag), accessKeyID, secret, *dryRunFlag); err != nil {
 			log.Fatalf("[sync_tables] 拉取失败：%v", err)
 		}
 		log.Println("[sync_tables] 拉取完成")
@@ -121,6 +133,7 @@ func printSyncTablesHelp() {
   [-push 模式] 推送 local -> remote
     表已存在且未使用 -force 时：主键须与本地一致，否则报错；将用 AddDefinedColumn
     仅为远程补齐本地多出的预定义列（不删列、不改主键）。
+    tables.yaml 可为每张表配置 regionId（地域 ID）；同实例内优先取该实例任一表的 regionId。
     indexes 每项可写 indexType: global（默认，可省略）或 local（本地二级索引）。
     按表名推送时：远程缺索引会自动 CreateIndex；若 -table 为索引名则只同步该索引。
     生效参数:
@@ -136,7 +149,9 @@ func printSyncTablesHelp() {
     生效参数:
       -pull       开启拉取（必需）
       -table      仅拉取并替换同名表（拉取模式不支持按索引名）
+      -instance   指定单个实例（等价 -instances 的单值形式）
       -instances  指定要拉取的实例列表（逗号分隔）
+      -regionId   地域 ID（如 cn-hangzhou）：本地 YAML 尚未含该实例 regionId 时用于连接并写回 YAML（空文件 + -instances 时常用；多实例未配置时共用此值）
       -dry-run    不写文件，直接把生成 YAML 输出到 stdout
       -config     指定要写入（或预览目标）的本地 tables.yaml 路径
     拉取合并规则:
@@ -146,7 +161,7 @@ func printSyncTablesHelp() {
 常用环境变量（与 SimpleOTSGo SDK 一致）:
   TABLESTORE_ACCESS_KEY_ID / TABLESTORE_ACCESS_KEY_SECRET
   或 TABLESTORE_ACCESS_KEY / TABLESTORE_SECRET_KEY
-  TABLESTORE_AREA 或 SIMPLEOTSGO_TABLESTORE_AREA   区域，如 cn-hangzhou
+  地域 ID 通常由 tables.yaml 中每张表的 regionId 提供；拉取时空 YAML 可配合 -regionId；勿依赖 TABLESTORE_REGION_ID 等环境变量
   SIMPLEOTSGO_RUN_MODE 或 GO_ENV / APP_ENV / ENV   development=公网，production=VPC
   TABLESTORE_ENDPOINT   若设置则优先生效（多实例时请慎用）
   SIMPLEOTSGO_TABLES_PATH  tables.yaml 路径（与 -config 二选一）
@@ -194,11 +209,12 @@ func pushLocalToRemote(cfgPath, targetTable string, force bool, accessKeyID, sec
 		tables := byInstance[instanceName]
 		log.Printf("[sync_tables] ---------- 实例 %s（%d 张表）----------", instanceName, len(tables))
 
-		endpoint, err := simpleotsgo.SyncTableStoreEndpoint(instanceName)
+		regionID := resolveInstanceRegionIdFromTables(tables)
+		endpoint, err := sog.SyncTableStoreEndpointWithRegionId(instanceName, regionID)
 		if err != nil {
 			return fmt.Errorf("实例 %s 解析 endpoint 失败: %w", instanceName, err)
 		}
-		log.Printf("[sync_tables] endpoint: %s", endpoint)
+		log.Printf("[sync_tables] regionId: %s, endpoint: %s", fallbackSyncRegionIdForLog(regionID), endpoint)
 		client := tablestore.NewClient(endpoint, instanceName, accessKeyID, secret)
 
 		for i, tc := range tables {
@@ -240,6 +256,7 @@ func resolveIndexSyncTasks(tables []config.TableConfig, target string) ([]indexS
 			}
 			tasks = append(tasks, indexSyncTask{
 				InstanceName: t.InstanceName,
+				RegionId:     strings.TrimSpace(t.RegionId),
 				MainTable:    t,
 				Index:        idx,
 			})
@@ -259,12 +276,13 @@ func resolveIndexSyncTasks(tables []config.TableConfig, target string) ([]indexS
 func pushIndexesByTarget(tasks []indexSyncTask, accessKeyID, secret string, dryRun bool) error {
 	log.Printf("[sync_tables] 检测到目标为索引名，切换索引同步模式，共 %d 个任务", len(tasks))
 	for _, task := range tasks {
-		endpoint, err := simpleotsgo.SyncTableStoreEndpoint(task.InstanceName)
+		regionID := strings.TrimSpace(task.RegionId)
+		endpoint, err := sog.SyncTableStoreEndpointWithRegionId(task.InstanceName, regionID)
 		if err != nil {
 			return fmt.Errorf("实例 %s 解析 endpoint 失败: %w", task.InstanceName, err)
 		}
 		log.Printf("[sync_tables] ---------- 实例 %s（索引同步）----------", task.InstanceName)
-		log.Printf("[sync_tables] endpoint: %s", endpoint)
+		log.Printf("[sync_tables] regionId: %s, endpoint: %s", fallbackSyncRegionIdForLog(regionID), endpoint)
 		client := tablestore.NewClient(endpoint, task.InstanceName, accessKeyID, secret)
 
 		if dryRun {
@@ -282,7 +300,8 @@ func pushIndexesByTarget(tasks []indexSyncTask, accessKeyID, secret string, dryR
 }
 
 // pullRemoteToLocal 执行“远程 -> 本地”同步（回写 YAML）。
-func pullRemoteToLocal(cfgPath, targetTable, instancesArg, accessKeyID, secret string, dryRun bool) error {
+// pullRegionFallback 为拉取专用：当 existingTables 中某实例尚无 regionId 时，用该字符串拼接 endpoint 并写入拉取得到的表配置（空 YAML 引导场景）。
+func pullRemoteToLocal(cfgPath, targetTable, instancesArg, pullRegionFallback, accessKeyID, secret string, dryRun bool) error {
 	log.Println("[sync_tables] 模式：拉取（remote -> local）")
 	if targetTable != "" {
 		log.Printf("[sync_tables] 指定表：%s", targetTable)
@@ -301,15 +320,22 @@ func pullRemoteToLocal(cfgPath, targetTable, instancesArg, accessKeyID, secret s
 	}
 
 	remoteTables := make([]config.TableConfig, 0)
+	existingRegionIdByInstance := buildInstanceRegionIdByInstance(existingTables)
+	pullFallback := strings.TrimSpace(pullRegionFallback)
 	for _, instanceName := range instances {
-		endpoint, err := simpleotsgo.SyncTableStoreEndpoint(instanceName)
+		// 优先使用本地 YAML 中该实例已配置的 regionId；否则使用 -regionId（空 YAML 引导）；二者皆空则依赖 TABLESTORE_ENDPOINT。
+		regionID := effectiveRegionForPull(instanceName, existingRegionIdByInstance, pullFallback)
+		if regionID == "" && strings.TrimSpace(os.Getenv("TABLESTORE_ENDPOINT")) == "" {
+			return fmt.Errorf("实例 %q 无法解析 endpoint：本地 tables.yaml 未含其 regionId，且未传 -regionId、未设置 TABLESTORE_ENDPOINT（空 YAML 拉取请加 -regionId，如 cn-hangzhou）", instanceName)
+		}
+		endpoint, err := sog.SyncTableStoreEndpointWithRegionId(instanceName, regionID)
 		if err != nil {
 			return fmt.Errorf("实例 %s 解析 endpoint 失败: %w", instanceName, err)
 		}
-		log.Printf("[sync_tables] 实例 %s endpoint: %s", instanceName, endpoint)
+		log.Printf("[sync_tables] 实例 %s regionId: %s, endpoint: %s", instanceName, fallbackSyncRegionIdForLog(regionID), endpoint)
 		client := tablestore.NewClient(endpoint, instanceName, accessKeyID, secret)
 
-		oneInstanceTables, err := pullOneInstanceTables(client, instanceName, targetTable)
+		oneInstanceTables, err := pullOneInstanceTables(client, instanceName, regionID, targetTable)
 		if err != nil {
 			return fmt.Errorf("实例 %s 拉取失败: %w", instanceName, err)
 		}
@@ -351,7 +377,7 @@ func pullRemoteToLocal(cfgPath, targetTable, instancesArg, accessKeyID, secret s
 }
 
 // pullOneInstanceTables 拉取某个实例下的全部（或指定）主表结构。
-func pullOneInstanceTables(client *tablestore.TableStoreClient, instanceName, targetTable string) ([]config.TableConfig, error) {
+func pullOneInstanceTables(client *tablestore.TableStoreClient, instanceName, regionID, targetTable string) ([]config.TableConfig, error) {
 	tableNames := make([]string, 0)
 	if targetTable != "" {
 		tableNames = append(tableNames, targetTable)
@@ -388,16 +414,17 @@ func pullOneInstanceTables(client *tablestore.TableStoreClient, instanceName, ta
 			continue
 		}
 		desc := descByName[name]
-		results = append(results, convertDescribeToYAMLTable(instanceName, desc))
+		results = append(results, convertDescribeToYAMLTable(instanceName, regionID, desc))
 	}
 	return results, nil
 }
 
 // convertDescribeToYAMLTable 将 DescribeTable 响应转换为 YAML 表结构。
-func convertDescribeToYAMLTable(instanceName string, desc *tablestore.DescribeTableResponse) config.TableConfig {
+func convertDescribeToYAMLTable(instanceName, regionID string, desc *tablestore.DescribeTableResponse) config.TableConfig {
 	table := config.TableConfig{
 		Name:           desc.TableMeta.TableName,
 		InstanceName:   instanceName,
+		RegionId:       strings.TrimSpace(regionID),
 		PrimaryKeys:    make([]config.PrimaryKey, 0, len(desc.TableMeta.SchemaEntry)),
 		DefinedColumns: make([]config.DefinedColumn, 0, len(desc.TableMeta.DefinedColumns)),
 		Indexes:        make([]config.Index, 0, len(desc.IndexMetas)),
@@ -496,6 +523,50 @@ func sortedInstanceKeys(byInstance map[string][]config.TableConfig) []string {
 
 // resolveInstances 解析拉取目标实例列表。
 // 优先级：-instances > 本地 tables.yaml 中出现的 instanceName。
+
+func resolveInstanceRegionIdFromTables(tables []config.TableConfig) string {
+	for _, t := range tables {
+		if v := strings.TrimSpace(t.RegionId); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// effectiveRegionForPull 合并「YAML 中该实例的 regionId」与「-regionId 命令行回退」，供拉取连接与写回表结构使用。
+func effectiveRegionForPull(instanceName string, byInstance map[string]string, cliFallback string) string {
+	if r := strings.TrimSpace(byInstance[instanceName]); r != "" {
+		return r
+	}
+	return strings.TrimSpace(cliFallback)
+}
+
+// buildInstanceRegionIdByInstance 从已有 YAML 表中提取「实例 -> 首个非空 regionId」映射，供拉取时选用。
+func buildInstanceRegionIdByInstance(tables []config.TableConfig) map[string]string {
+	m := make(map[string]string)
+	for _, t := range tables {
+		in := strings.TrimSpace(t.InstanceName)
+		ar := strings.TrimSpace(t.RegionId)
+		if in == "" || ar == "" {
+			continue
+		}
+		if _, ok := m[in]; ok {
+			continue
+		}
+		m[in] = ar
+	}
+	return m
+}
+
+// fallbackSyncRegionIdForLog 用于日志：展示当前解析到的 regionId（仅来自 tables.yaml 聚合）。
+func fallbackSyncRegionIdForLog(regionID string) string {
+	regionID = strings.TrimSpace(regionID)
+	if regionID != "" {
+		return regionID
+	}
+	return "(empty, check regionId in tables.yaml for this instance)"
+}
+
 func resolveInstances(existing []config.TableConfig, instancesArg string) []string {
 	if instancesArg != "" {
 		parts := strings.Split(instancesArg, ",")
@@ -794,33 +865,37 @@ func syncOneIndex(client *tablestore.TableStoreClient, tableCfg config.TableConf
 
 // yamlPrimaryKeyType 将 YAML 类型字符串转换为主键类型。
 func yamlPrimaryKeyType(s string) (tablestore.PrimaryKeyType, error) {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "STRING":
-		return tablestore.PrimaryKeyType_STRING, nil
-	case "INTEGER", "INT":
+	r, err := config.ParsePrimaryKeyType(s)
+	if err != nil {
+		return 0, err
+	}
+	switch r {
+	case config.PrimaryKeyTypeInteger:
 		return tablestore.PrimaryKeyType_INTEGER, nil
-	case "BINARY":
+	case config.PrimaryKeyTypeBinary:
 		return tablestore.PrimaryKeyType_BINARY, nil
 	default:
-		return 0, fmt.Errorf("不支持的主键类型: %q", s)
+		return tablestore.PrimaryKeyType_STRING, nil
 	}
 }
 
 // yamlDefinedColumnType 将 YAML 类型字符串转换为预定义列类型。
 func yamlDefinedColumnType(s string) (tablestore.DefinedColumnType, error) {
-	switch strings.ToUpper(strings.TrimSpace(s)) {
-	case "STRING":
-		return tablestore.DefinedColumn_STRING, nil
-	case "INTEGER", "INT":
+	r, err := config.ParseDefinedColumnType(s)
+	if err != nil {
+		return 0, err
+	}
+	switch r {
+	case config.DefinedColumnInteger:
 		return tablestore.DefinedColumn_INTEGER, nil
-	case "BOOLEAN", "BOOL":
-		return tablestore.DefinedColumn_BOOLEAN, nil
-	case "DOUBLE", "FLOAT":
-		return tablestore.DefinedColumn_DOUBLE, nil
-	case "BINARY", "BLOB":
+	case config.DefinedColumnBinary:
 		return tablestore.DefinedColumn_BINARY, nil
+	case config.DefinedColumnBoolean:
+		return tablestore.DefinedColumn_BOOLEAN, nil
+	case config.DefinedColumnDouble:
+		return tablestore.DefinedColumn_DOUBLE, nil
 	default:
-		return 0, fmt.Errorf("不支持的属性列类型: %q", s)
+		return tablestore.DefinedColumn_STRING, nil
 	}
 }
 

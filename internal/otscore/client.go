@@ -1,8 +1,9 @@
-package simpleotsgo
+package otscore
 
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/aliyun/aliyun-tablestore-go-sdk/v5/tablestore"
 )
@@ -63,6 +64,13 @@ func NewClient(opts ...Option) (*Client, error) {
 		AccessKeyID:     os.Getenv("TABLESTORE_ACCESS_KEY"),
 		AccessKeySecret: os.Getenv("TABLESTORE_SECRET_KEY"),
 	}
+	// 兼容阿里云常见变量名：当 ACCESS_KEY/SECRET_KEY 未设置时，回退 *_ID/*_SECRET。
+	if strings.TrimSpace(config.AccessKeyID) == "" {
+		config.AccessKeyID = os.Getenv("TABLESTORE_ACCESS_KEY_ID")
+	}
+	if strings.TrimSpace(config.AccessKeySecret) == "" {
+		config.AccessKeySecret = os.Getenv("TABLESTORE_ACCESS_KEY_SECRET")
+	}
 
 	// 再应用调用方传入的显式配置，以显式参数优先。
 	for _, opt := range opts {
@@ -100,7 +108,10 @@ func (c *Client) GetClient() *tablestore.TableStoreClient {
 }
 
 // PutRow 写入（或覆盖）一行数据。
-// 注意：该方法将 map 中第一组键值视为主键，仅用于简单场景；列名以 _json 结尾的属性在写入前会将 map/slice 等序列化为字符串。
+//
+// Deprecated: 该方法将 map 中第一个遍历到的键值对视为主键，但 Go map 遍历顺序不确定，
+// 联合主键场景下行为不可预测。请使用 SimpleTableOperator.PutRow(data, cond)，它会根据 tables.yaml
+// 中定义的主键列顺序正确构建主键。
 func (c *Client) PutRow(table string, data map[string]interface{}) error {
 	rowForOTS := shallowCopyMap(data)
 	if err := encodeJSONSuffixColumnsInMap(rowForOTS); err != nil {
@@ -273,7 +284,10 @@ func (c *Client) DeleteRow(table string, primaryKey map[string]interface{}) erro
 }
 
 // BatchPutRow 批量写入多行数据。
-// 注意：该方法同样采用“每行首字段为主键”的简化约定。
+//
+// Deprecated: 该方法将每行 map 中第一个遍历到的键值对视为主键，但 Go map 遍历顺序不确定，
+// 联合主键场景下行为不可预测。请使用 SimpleTableOperator.BatchPutRows(rows, condition, returnType)，它会根据 tables.yaml
+// 中定义的主键列顺序正确构建主键，并返回 BatchWriteRow 的 RowResult 映射。
 func (c *Client) BatchPutRow(table string, rows []map[string]interface{}) error {
 	batchWriteRowRequest := &tablestore.BatchWriteRowRequest{
 		RowChangesGroupByTable: make(map[string][]tablestore.RowChange),

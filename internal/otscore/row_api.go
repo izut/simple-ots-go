@@ -1,4 +1,4 @@
-package simpleotsgo
+package otscore
 
 import (
 	"fmt"
@@ -111,13 +111,20 @@ func getRowResponseToMap(resp *tablestore.GetRowResponse) map[string]interface{}
 	if resp == nil {
 		return m
 	}
+	// PrimaryKey 在 SDK 中为值类型，本身不会是 nil；PrimaryKeys 为 nil 时 range 仍安全。若分片中含 nil 列指针则跳过，避免解引用 panic。
 	for _, pkCol := range resp.PrimaryKey.PrimaryKeys {
+		if pkCol == nil {
+			continue
+		}
 		m[pkCol.ColumnName] = pkCol.Value
 	}
 	for _, col := range resp.Columns {
 		m[col.ColumnName] = col.Value
 	}
 	// 将 *_json 列从 STRING 反序列化为 map/slice 等（TableStore 无 JSON 类型）。
+	if len(m) == 0 {
+		return nil
+	}
 	decodeJSONSuffixColumns(m)
 	return m
 }
@@ -143,43 +150,47 @@ func rowToMap(row *tablestore.Row) map[string]interface{} {
 	return tableStoreRowToDecodedMap(row)
 }
 
+// RowToMap 将 SDK 的单行结果转换为 map，并自动解析 *_json 列。
+// 该方法适用于调用方直接拿到 *tablestore.Row 的场景（例如 GetRangeResponse.Rows 的元素）。
+func RowToMap(row *tablestore.Row) map[string]interface{} {
+	return rowToMap(row)
+}
+
 // BatchGetRowItem 表示 BatchGetRow 中单行结果（含行级错误）。
 type BatchGetRowItem struct {
-	Index int           // 与请求中主键顺序一致
-	OK    bool          // 是否成功
-	Err   error         // 失败时 OTS 返回的语义化错误
-	Row   map[string]interface{} // 成功且行存在时的属性 + 主键列
+	Index                int                              // 与请求中主键顺序一致
+	OK                   bool                             // 是否成功
+	Err                  error                            // 失败时 OTS 返回的语义化错误
+	Row                  map[string]interface{}           // 成功且行存在时的属性 + 主键列
+	ConsumedCapacityUnit *tablestore.ConsumedCapacityUnit // 消耗的CU
 }
 
+// rowResultToMap 将 BatchGetRow 返回的 RowResult 转为与 GetRow 相同语义的 map（含 *_json 解析）。
+// 行不存在或无任何单元格时与 getRowResponseToMap 一致返回 nil，避免调用方把空 map 误判为「有数据」。
 func rowResultToMap(r *tablestore.RowResult) map[string]interface{} {
-	m := make(map[string]interface{})
-	for _, pkCol := range r.PrimaryKey.PrimaryKeys {
-		m[pkCol.ColumnName] = pkCol.Value
+	if r == nil {
+		return nil
 	}
-	for _, col := range r.Columns {
-		m[col.ColumnName] = col.Value
+	// 复用 GetRow 响应的解码路径，保证与 GetRowWithOptions 行为一致。
+	gr := &tablestore.GetRowResponse{
+		PrimaryKey: r.PrimaryKey,
+		Columns:    r.Columns,
 	}
-	decodeJSONSuffixColumns(m)
-	return m
+	return getRowResponseToMap(gr)
 }
 
-// BatchGetRowSameTable 对单张表批量主键读取（共享 ColumnsToGet / MaxVersion）。
-func (c *Client) BatchGetRowSameTable(table string, keys []*tablestore.PrimaryKey, opts *GetRowOptions) ([]BatchGetRowItem, error) {
+// BatchGetRowSameTable 对【单】【张】【表】批量主键读取；MaxVersion 固定为 1（阿里云 Go SDK 要求非 0，且与单行读取默认一致）。
+// columnsToGet 为空或仅空串时不做列裁剪；非空时只拉取列出的属性列。
+func (c *Client) BatchGetRowSameTable(table string, keys []*tablestore.PrimaryKey, columnsToGet []string) ([]BatchGetRowItem, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	mv := int32(1)
-	var cols []string
-	if opts != nil {
-		mv = applyMaxVersion(opts.MaxVersion)
-		cols = append(cols, opts.ColumnsToGet...)
-	}
 	mrc := &tablestore.MultiRowQueryCriteria{
 		TableName:  table,
-		MaxVersion: int(mv),
+		MaxVersion: 1,
 		PrimaryKey: keys,
 	}
-	for _, col := range cols {
+	for _, col := range columnsToGet {
 		if col != "" {
 			mrc.AddColumnToGet(col)
 		}
@@ -203,7 +214,7 @@ func (c *Client) BatchGetRowSameTable(table string, keys []*tablestore.PrimaryKe
 	out := make([]BatchGetRowItem, len(rows))
 	for i := range rows {
 		rr := rows[i]
-		item := BatchGetRowItem{Index: i, OK: rr.IsSucceed}
+		item := BatchGetRowItem{Index: i, OK: rr.IsSucceed, ConsumedCapacityUnit: rr.ConsumedCapacityUnit}
 		if !rr.IsSucceed {
 			item.Err = fmt.Errorf("%s: %s", rr.Error.Code, rr.Error.Message)
 			out[i] = item
@@ -312,22 +323,24 @@ func (c *Client) UpdateRowWithMutation(table string, pk *tablestore.PrimaryKey, 
 type GetRangeOptions struct {
 	ColumnsToGet []string
 	// Direction 使用 tablestore.FORWARD（默认）或 tablestore.BACKWARD 反向扫描。
-	Direction tablestore.Direction
-	Limit     int32
+	Direction  tablestore.Direction
+	Limit      int32
 	MaxVersion int32
 	// ReturnSpecifiedPkOnly 为 true 且 ColumnsToGet 未包含全部主键列时，仅返回列裁剪中的主键子集（见 OTS 文档）。
 	ReturnSpecifiedPkOnly bool
 }
 
-// GetRangePage 表示一页 GetRange 结果。
-// 分页：若 NextStartPrimaryKey 非 nil，则以之为新的 StartPrimaryKey、保持相同 EndPrimaryKey 与 Direction 再次调用 GetRangeWithOptions，直至 NextStartPrimaryKey 为 nil。
+// GetRangePage 表示一页「已解码」的 GetRange 结果（业务 map + 下一页主键），便于在不需要原始 SDK 类型时使用。
+// 若直接使用 GetRangeWithOptions，其返回 *tablestore.GetRangeResponse：请对 Rows 中每行调用 RowToMap 以得到与本结构 Rows 相同语义的 map（含 *_json 解析）。
 type GetRangePage struct {
-	Rows                 []map[string]interface{}
-	NextStartPrimaryKey  *tablestore.PrimaryKey
+	Rows                []map[string]interface{}
+	NextStartPrimaryKey *tablestore.PrimaryKey
 }
 
-// GetRangeWithOptions 范围查询：支持 ColumnToGet、反向扫描、Limit；通过 NextStartPrimaryKey 分页。
-func (c *Client) GetRangeWithOptions(table string, startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) (*GetRangePage, error) {
+// GetRangeWithOptions 范围查询：支持 ColumnToGet、反向扫描、Limit；返回官方 SDK 的 GetRangeResponse。
+// 分页：若 resp.NextStartPrimaryKey 非 nil，则以之为新的 StartPrimaryKey、保持相同 EndPrimaryKey 与 Direction 再次调用本函数，直至 NextStartPrimaryKey 为 nil。
+// 将每行转为 map 并解析 *_json 列请使用 RowToMap。
+func (c *Client) GetRangeWithOptions(table string, startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) (*tablestore.GetRangeResponse, error) {
 	if startPK == nil || endPK == nil {
 		return nil, fmt.Errorf("start or end primary key is nil")
 	}
@@ -347,12 +360,5 @@ func (c *Client) GetRangeWithOptions(table string, startPK, endPK *tablestore.Pr
 	if err != nil {
 		return nil, fmt.Errorf("get range failed: %w", err)
 	}
-	page := &GetRangePage{
-		Rows:                make([]map[string]interface{}, 0, len(resp.Rows)),
-		NextStartPrimaryKey: resp.NextStartPrimaryKey,
-	}
-	for _, row := range resp.Rows {
-		page.Rows = append(page.Rows, rowToMap(row))
-	}
-	return page, nil
+	return resp, nil
 }

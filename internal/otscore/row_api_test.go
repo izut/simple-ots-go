@@ -1,6 +1,10 @@
-package simpleotsgo
+package otscore
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/aliyun/aliyun-tablestore-go-sdk/v5/tablestore"
+)
 
 func TestBuildUpdateRowChange_EmptyMutationErrors(t *testing.T) {
 	pk := NewPrimaryKey(PKEntry{Name: "k", Value: "v"})
@@ -23,5 +27,26 @@ func TestPrimaryKeyToMap(t *testing.T) {
 	m := PrimaryKeyToMap(pk)
 	if m["a"] != "1" || m["b"] != int64(2) {
 		t.Fatalf("%v", m)
+	}
+}
+
+func TestRowToMap_DecodeJSONSuffix(t *testing.T) {
+	row := &tablestore.Row{
+		PrimaryKey: NewPrimaryKey(PKEntry{Name: "uid", Value: "u1"}),
+		Columns: []*tablestore.AttributeColumn{
+			{ColumnName: "meta_data_json", Value: `{"k":"v","n":1}`},
+			{ColumnName: "plain", Value: "ok"},
+		},
+	}
+	m := RowToMap(row)
+	if m["uid"] != "u1" || m["plain"] != "ok" {
+		t.Fatalf("unexpected row map: %+v", m)
+	}
+	obj, ok := m["meta_data_json"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("meta_data_json should be decoded object, got %T", m["meta_data_json"])
+	}
+	if obj["k"] != "v" {
+		t.Fatalf("decoded json mismatch: %+v", obj)
 	}
 }
