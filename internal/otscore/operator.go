@@ -231,12 +231,12 @@ func buildGetRowOptionsFromReadParams(columnsToGet []string, maxVersion int32) *
 // columnsToGet 非空时只拉取列出的属性列（主键列是否随列投影返回以 OTS 为准）；为空表示不限制列。
 // maxVersion 为最大版本数；<=0 时按 1 处理。
 // 主键字段须与 tables.yaml 中 primaryKeys 列名一致。
-func (op *SimpleTableOperator) GetRow(primaryKeys map[string]interface{}, columnsToGet []string, maxVersion int32) (map[string]interface{}, error) {
+func (op *SimpleTableOperator) GetRow(primaryKeys map[string]interface{}, columnsToGet []string) (map[string]interface{}, error) {
 	pk, err := op.buildPrimaryKey(primaryKeys)
 	if err != nil {
 		return nil, err
 	}
-	opts := buildGetRowOptionsFromReadParams(columnsToGet, maxVersion)
+	opts := buildGetRowOptionsFromReadParams(columnsToGet, 1)
 	return op.tsClient().GetRowWithOptions(op.tableName, pk, opts)
 }
 
