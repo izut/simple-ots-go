@@ -62,6 +62,26 @@ func defaultPutRowCondition(cond *tablestore.RowCondition) *tablestore.RowCondit
 	}
 }
 
+// defaultUpdateRowCondition 若调用方未传 cond，则与单行 UpdateRow(cond==nil) 一致：要求行已存在（EXPECT_EXIST）。
+func defaultUpdateRowCondition(cond *tablestore.RowCondition) *tablestore.RowCondition {
+	if cond != nil {
+		return cond
+	}
+	return &tablestore.RowCondition{
+		RowExistenceExpectation: tablestore.RowExistenceExpectation_EXPECT_EXIST,
+	}
+}
+
+// defaultDeleteRowCondition 若调用方未传 cond，则与历史行为一致：校验行是否存在（删除写入）。
+func defaultDeleteRowCondition(cond *tablestore.RowCondition) *tablestore.RowCondition {
+	if cond != nil {
+		return cond
+	}
+	return &tablestore.RowCondition{
+		RowExistenceExpectation: tablestore.RowExistenceExpectation_EXPECT_EXIST,
+	}
+}
+
 // assemblePutRowChangeFromMap 根据一行数据构建 PutRowChange：按 tables.yaml 解析主键、*_json 编码、剥离主键列后写入属性列。
 // cond 为 nil 时使用 RowExistenceExpectation_IGNORE（与旧版 PutRow 默认一致）。
 func (op *SimpleTableOperator) assemblePutRowChangeFromMap(row map[string]interface{}, cond *tablestore.RowCondition) (*tablestore.PutRowChange, error) {

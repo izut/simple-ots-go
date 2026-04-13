@@ -103,6 +103,7 @@ type GetRangePage = otscore.GetRangePage
 type RowCondition = tablestore.RowCondition
 type PrimaryKey = tablestore.PrimaryKey
 type Row = tablestore.Row
+type BatchWriteAction = otscore.BatchWriteAction
 
 // NewPrimaryKey 按表定义顺序构造 *tablestore.PrimaryKey。
 func NewPrimaryKey(entries ...PKEntry) *tablestore.PrimaryKey {

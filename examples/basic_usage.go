@@ -171,7 +171,7 @@ func (t *TaskLogTable) BatchGetRowsExample() {
 }
 
 func (t *TaskLogTable) BatchPutRowsExample() {
-	fmt.Print("\n-------------------------------------BatchWriteRows Example----------------------------------------------------Start\n批量写入测试开始\n")
+	fmt.Print("\n-------------------------------------BatchPutRows Example----------------------------------------------------Start\n批量写入测试开始\n")
 	put_rows := []map[string]interface{}{
 		{
 			"task_id":   "WF22:123",
@@ -189,6 +189,52 @@ func (t *TaskLogTable) BatchPutRowsExample() {
 		panic(err)
 	}
 	fmt.Println("批量写入成功", batchWriteResult)
+	fmt.Print("批量写入测试结束\n---------------------------BatchPutRows Example--------------------------------------------------------------END\n\n")
+}
+
+func (t *TaskLogTable) BatchWriteRowsExample() {
+	fmt.Print("\n-------------------------------------BatchWriteRows Example----------------------------------------------------Start\n批量写入测试开始\n")
+	batchWriteAction := sog.BatchWriteAction{
+		PutRows: []map[string]interface{}{
+			{
+				"task_id":   "WF22:333",
+				"timestamp": time.Now().UnixMilli(),
+				"status":    "pending",
+			},
+		},
+		UpdateRows: []map[string]interface{}{
+			{
+				"task_id":   "WF22:333",
+				"timestamp": time.Now().UnixMilli(),
+				"status":    "completed",
+			},
+		},
+		DeleteRows: []map[string]interface{}{
+			{
+				"task_id":   "WF22:333",
+				"timestamp": time.Now().UnixMilli(),
+			},
+		},
+		PutCond:    sog.IGNORE,
+		UpdateCond: sog.IGNORE,
+		DeleteCond: sog.IGNORE,
+	}
+
+	// BatchWriteRows 返回 BatchWriteRowResponse，可用于查看每行执行结果；此处仅校验整体错误。
+	rowResults, err := t.Conn.BatchWriteRows(batchWriteAction)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("批量写入结果", rowResults)
+
+	for _, rowResult := range rowResults {
+		fmt.Println("RowResult", rowResult)
+		fmt.Println("Index", rowResult.Index)
+		fmt.Println("IsSucceed", rowResult.IsSucceed)
+		fmt.Println("Error", rowResult.Error)
+		fmt.Println("ConsumedCapacityUnit", rowResult.ConsumedCapacityUnit.Write, rowResult.ConsumedCapacityUnit.Read)
+		fmt.Println("PrimaryKey", rowResult.PrimaryKey)
+	}
 	fmt.Print("批量写入测试结束\n---------------------------BatchWriteRows Example--------------------------------------------------------------END\n\n")
 }
 
@@ -227,6 +273,9 @@ func main() {
 	t.BatchGetRowsExample()
 	// 测试批量写入
 	t.BatchPutRowsExample()
+
+	// 测试批量写入
+	t.BatchWriteRowsExample()
 }
 
 func ReadAndPrintRow(pkmap map[string]interface{}) {
@@ -234,7 +283,7 @@ func ReadAndPrintRow(pkmap map[string]interface{}) {
 	if err != nil {
 		panic(err)
 	}
-	row, err := taskTable.GetRow(pkmap, nil, 0)
+	row, err := taskTable.GetRow(pkmap, nil)
 	if err != nil {
 		panic(err)
 	}

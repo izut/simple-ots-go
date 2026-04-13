@@ -260,6 +260,100 @@ func (op *SimpleTableOperator) BatchWriteChanges(changes []tablestore.RowChange)
 	return op.tsClient().BatchWriteRowChanges(changes)
 }
 
+// BatchWriteAction 批量写入操作
+type BatchWriteAction struct {
+	PutRows    []map[string]interface{}
+	UpdateRows []map[string]interface{}
+	DeleteRows []map[string]interface{}
+	PutCond    *tablestore.RowCondition
+	UpdateCond *tablestore.RowCondition
+	DeleteCond *tablestore.RowCondition
+}
+
+// BatchWriteRows 批量写入操作。
+// 支持 Put / Update / Delete 三种操作，支持条件控制；返回官方 SDK 的 BatchWriteRowResponse.TableToRowsResult（含每行结果、CU、错误详情等）。
+// 不再返回ReqeustId, tablestoreV5中似乎已删除ReturnType, 不再返回PrimaryKey
+func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]tablestore.RowResult, error) {
+	batchRequest := &tablestore.BatchWriteRowRequest{
+		RowChangesGroupByTable: make(map[string][]tablestore.RowChange),
+	}
+	pkNames := op.primaryKeyNameSet()
+
+	putCond := defaultPutRowCondition(actions.PutCond)
+	updateCond := defaultUpdateRowCondition(actions.UpdateCond)
+	deleteCond := defaultDeleteRowCondition(actions.DeleteCond)
+
+	for _, row := range actions.PutRows {
+		putRowChange, err := op.assemblePutRowChangeFromMap(row, putCond)
+		if err != nil {
+			return nil, err
+		}
+		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], putRowChange)
+	}
+	for _, row := range actions.UpdateRows {
+		pk, err := op.buildPrimaryKey(row)
+		if err != nil {
+			return nil, err
+		}
+
+		updateRowChange := &tablestore.UpdateRowChange{
+			TableName:  op.tableName,
+			PrimaryKey: pk,
+			Condition:  updateCond,
+		}
+		updatesForOTS := shallowCopyMap(row)
+		for col := range pkNames {
+			delete(updatesForOTS, col)
+		}
+		if err := encodeJSONSuffixColumnsInMap(updatesForOTS); err != nil {
+			return nil, err
+		}
+		for colName, val := range updatesForOTS {
+			updateRowChange.PutColumn(colName, val)
+		}
+		if len(updateRowChange.Columns) == 0 {
+			return nil, fmt.Errorf("batch update row: row must contain at least one non-primary-key column")
+		}
+		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], updateRowChange)
+	}
+	for _, row := range actions.DeleteRows {
+		pk, err := op.buildPrimaryKey(row)
+		if err != nil {
+			return nil, err
+		}
+		deleteRowChange := &tablestore.DeleteRowChange{
+			TableName:  op.tableName,
+			PrimaryKey: pk,
+			Condition:  deleteCond,
+		}
+		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], deleteRowChange)
+	}
+	var resp *tablestore.BatchWriteRowResponse
+	err := withRetry(func() error {
+		var innerErr error
+		resp, innerErr = op.client.BatchWriteRow(batchRequest)
+		return innerErr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("batch write rows failed: %w", err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("batch write rows:响应为 nil")
+	}
+	want := len(actions.PutRows) + len(actions.UpdateRows) + len(actions.DeleteRows)
+	rowResults, ok := resp.TableToRowsResult[op.tableName]
+	if !ok {
+		return nil, fmt.Errorf("batch write rows: 响应中缺少表 %q 的 TableToRowsResult", op.tableName)
+	}
+	if len(rowResults) == 0 {
+		return nil, fmt.Errorf("batch write rows: 表 %q 的 RowResult 列表为空", op.tableName)
+	}
+	if len(rowResults) != want {
+		return nil, fmt.Errorf("batch write rows: 期望 %d 条 RowResult，实际 %d 条", want, len(rowResults))
+	}
+	return rowResults, nil
+}
+
 // UpdateRowWithMutation 使用 UpdateMutation 更新一行（Put / 删列 / 自增 / 按版本删列）。
 func (op *SimpleTableOperator) UpdateRowWithMutation(primaryKeys map[string]interface{}, mut *UpdateMutation, cond *tablestore.RowCondition) error {
 	pk, err := op.buildPrimaryKey(primaryKeys)
