@@ -78,6 +78,7 @@ func main() {
 
 - `instanceName` 来自 `tables.yaml` 中对应表配置
 - 每张表须在 `tables.yaml` 中配置 `regionId`（地域 ID，如 `cn-hangzhou`），SDK 不再从环境变量读取地域
+- 主表可选 `dataLifeCycle`（单位：秒），默认 `-1`（永不过期）；该参数仅作用于主表 `CreateTable.TableOption.TimeToAlive`
 - `APP_ENV=development` 使用公网 endpoint
 - `APP_ENV=production` 使用 VPC endpoint
 - `GO_ENV=production` 与 `SIMPLEOTSGO_RUN_MODE=production` 与 `APP_ENV=production` 等价参与判定（与常见 Go 项目习惯一致）
@@ -85,73 +86,107 @@ func main() {
 
 ## 同步表结构（CLI）
 
-支持双向同步，**必须显式指定一种方向**：
+支持双向同步（**必须二选一**）：
 
-- `-push`：`tables.yaml -> TableStore`（创建/重建表）
-- `-pull`：`TableStore -> tables.yaml`（回写远程表结构）
+- `-push`：`tables.yaml -> TableStore`（建表/补列/补索引）
+- `-pull`：`TableStore -> tables.yaml`（回写远程结构）
+
+### 环境准备
 
 ```bash
-export APP_ENV=development   # 生产改 production 或 export GO_ENV=production 
+export APP_ENV=development     # 生产环境改 production（或 GO_ENV=production）
 export TABLESTORE_ACCESS_KEY_ID=...
 export TABLESTORE_ACCESS_KEY_SECRET=...
 # 或使用：TABLESTORE_ACCESS_KEY + TABLESTORE_SECRET_KEY
+```
 
+### 快速用法
+
+```bash
+# 推送全部表
 go run ./cmd/sync_tables -push
-```
 
-查看命令行帮助：`go run ./cmd/sync_tables --help`（亦支持 `-h`、`-help`）
-
-### 在任意项目直接使用已发布版本
-
-如果你不在本仓库目录，也可以直接使用发布 tag 的 `sync_tables`。
-
-方式一：安装后长期使用（推荐）
-
-```bash
-go install github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha
-sync_tables -push -config ./config/tables.yaml
-```
-
-方式二：不安装，按版本单次运行
-
-```bash
-go run github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha -push -config ./config/tables.yaml
-```
-
-说明：
-
-- 以上命令中的 `v1.0.alpha` 可替换为你要使用的发布 tag
-- `-config` 路径相对于当前执行目录；不传时默认 `./config/tables.yaml`
-- 环境变量要求与本仓库内运行一致（如 `TABLESTORE_ACCESS_KEY_ID/SECRET` 等）；运行 SDK 时地域写在 `tables.yaml` 的 `regionId`；`sync_tables -pull` 在空 YAML 场景可用 `-regionId` 或 `TABLESTORE_ENDPOINT`
-
-常用参数：
-
-- `-push`：推送到远程（与 `-pull` 二选一，**必选其一**）
-- `-table 名称`：指定目标。`-push` 模式可传“表名或索引名”；`-pull` 模式仅支持表名
-- `-force`：表已存在则先删后建（**生产慎用**）
-- `-config path`：`tables.yaml` 路径（默认与 `SIMPLEOTSGO_TABLES_PATH` 或 `./config/tables.yaml` 一致）
-- `-pull`：从远程拉取并写回本地 YAML（与 `-push` 二选一）。**全量拉取**时只替换本次涉及的实例（`-instances` 或 YAML 里出现的实例）下的表，**其它实例的表定义保留**；带 `-table` 时只替换同名那一张表
-- `-instances a,b`：拉取模式可选，显式指定实例列表（当本地 YAML 为空时很有用；此时请同时传 `-regionId cn-hangzhou` 等，或设置 `TABLESTORE_ENDPOINT`）
-- `-regionId`：拉取专用；当本地 YAML 尚未包含某实例的 `regionId` 时用于连接远程并写回该字段（与 `-instances` 搭配引导空文件时常用）
-- `-dry-run`：演练模式——**不**执行 `DeleteTable`/`CreateTable`，**不**覆盖 `tables.yaml`；拉取时会把生成的 YAML 打印到标准输出（可配合重定向保存）
-
-拉取示例：
-
-```bash
+# 拉取全部表
 go run ./cmd/sync_tables -pull
-go run ./cmd/sync_tables -pull -table user
-go run ./cmd/sync_tables -pull -instances tec05,tec06 -regionId cn-hangzhou
-go run ./cmd/sync_tables -push -table task_log_index_level
 ```
 
-演练示例：
+查看完整参数：`go run ./cmd/sync_tables --help`（同样支持 `-h` / `-help`）
+
+### 参数说明（新版）
+
+- `-push` / `-pull`：方向互斥，且必须指定一个
+- `-table <name|*>`：
+  - `-table "*"`：表示全部表（在 `-push` / `-pull` 都生效）
+  - `-push` 时可传索引名：仅执行该索引 `CreateIndex`
+  - `-pull` 时仅支持主表名（不支持按索引名）
+- `-instance <name>`：单实例别名，等价 `-instances <name>`
+- `-instances a,b`：按实例过滤；在 `-push` / `-pull` 都生效
+- `-regionId`：拉取时地域回退（本地 YAML 缺该实例 `regionId` 时使用）
+- `-regionid`：`-regionId` 的全小写别名
+- `-force`：`-push` 模式下先删后建（高风险）
+- `-dry-run`：演练模式（不改远程、不写本地文件）
+- `-config <path>`：`tables.yaml` 路径（默认 `SIMPLEOTSGO_TABLES_PATH` 或 `./config/tables.yaml`）
+
+### 行为规则（重点）
+
+- `-table "*"` 与不传 `-table` 等价，都是“全部表”
+- 指定 `-instance/-instances` 时，只处理这些实例下的表（push/pull 都一样）
+- `-pull` 合并策略：
+  - 指定 `-table`：只替换同名表，其他表保留
+  - 全量（未指定具体表）：只替换本次涉及实例下的表，其他实例保留
+- 若设置 `TABLESTORE_ENDPOINT`，本次任务的所有实例都会共用该 endpoint（多实例请谨慎）
+
+### 与数据生命周期配合
+
+主表支持 `dataLifeCycle`（秒）字段，默认 `-1`（永不过期）：
+
+```yaml
+tables:
+  - name: task_log
+    instanceName: bigots
+    regionId: cn-hangzhou
+    dataLifeCycle: -1
+```
+
+- `-push` 时用于 `CreateTable.TableOption.TimeToAlive`
+- `-pull` 时会把远端 `TimeToAlive` 回填到 `tables.yaml`
+
+### 常用示例
 
 ```bash
+# 推送某实例全部表
+go run ./cmd/sync_tables -push -table "*" -instances tec05
+
+# 推送单表
+go run ./cmd/sync_tables -push -table task_log
+
+# 推送单索引（仅 push 支持）
+go run ./cmd/sync_tables -push -table task_log_index_level
+
+# 拉取某实例全部表（本地空 YAML 场景）
+go run ./cmd/sync_tables -pull -table "*" -instance tec05 -regionid cn-hangzhou
+
+# 拉取单表
+go run ./cmd/sync_tables -pull -table user
+
+# 演练模式
 go run ./cmd/sync_tables -push -dry-run
 go run ./cmd/sync_tables -pull -dry-run > /tmp/tables.preview.yaml
 ```
 
-若设置 `TABLESTORE_ENDPOINT`，同步工具对该次任务**所有实例**使用该地址（多实例配置时请谨慎）。
+### 在任意项目使用发布版本
+
+```bash
+# 安装后长期使用
+go install github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha
+sync_tables -push -config ./config/tables.yaml
+
+# 单次运行
+go run github.com/izut/simple-ots-go/cmd/sync_tables@v1.0.alpha -pull -table "*" -instances tec05 -regionId cn-hangzhou
+```
+
+- `v1.0.alpha` 可替换为你要使用的 tag
+- `-config` 为执行目录相对路径（不传默认 `./config/tables.yaml`）
 
 ## 进阶 API（可选）
 

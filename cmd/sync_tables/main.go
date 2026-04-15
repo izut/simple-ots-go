@@ -47,6 +47,8 @@ func main() {
 	dryRunFlag := flag.Bool("dry-run", false, "演练模式：不写远程、不写文件；拉取时 YAML 输出到 stdout")
 	// regionIdFlag 仅在拉取模式使用：当本地 YAML 某实例尚无 regionId 时，用于拼接 endpoint 并写入拉取结果（空 YAML + -instances 引导时必需，除非已设 TABLESTORE_ENDPOINT）。
 	regionIdFlag := flag.String("regionId", "", "拉取可选：地域 ID（如 cn-hangzhou）；本地未配置该实例 regionId 时生效")
+	// regionidFlag 为 -regionId 的全小写别名，便于命令行习惯输入。
+	regionidFlag := flag.String("regionid", "", "拉取可选：地域 ID（-regionId 的别名）")
 
 	// 注册帮助后设置 Usage，便于 flag.PrintDefaults 列出全部选项。
 	flag.Usage = printSyncTablesHelp
@@ -71,6 +73,13 @@ func main() {
 		}
 		*instancesFlag = strings.TrimSpace(*instanceFlag)
 	}
+	normalizedTableTarget := normalizeTableTarget(strings.TrimSpace(*tableFlag))
+	if strings.TrimSpace(*regionidFlag) != "" {
+		if strings.TrimSpace(*regionIdFlag) != "" && strings.TrimSpace(*regionidFlag) != strings.TrimSpace(*regionIdFlag) {
+			log.Fatal("[sync_tables] -regionId 与 -regionid 值不一致，请只保留一个或传相同值")
+		}
+		*regionIdFlag = strings.TrimSpace(*regionidFlag)
+	}
 
 	cfgPath := strings.TrimSpace(*configPathFlag)
 	if cfgPath == "" {
@@ -87,7 +96,7 @@ func main() {
 	}
 
 	if *pullFlag {
-		if err := pullRemoteToLocal(cfgPath, strings.TrimSpace(*tableFlag), strings.TrimSpace(*instancesFlag), strings.TrimSpace(*regionIdFlag), accessKeyID, secret, *dryRunFlag); err != nil {
+		if err := pullRemoteToLocal(cfgPath, normalizedTableTarget, strings.TrimSpace(*instancesFlag), strings.TrimSpace(*regionIdFlag), accessKeyID, secret, *dryRunFlag); err != nil {
 			log.Fatalf("[sync_tables] 拉取失败：%v", err)
 		}
 		log.Println("[sync_tables] 拉取完成")
@@ -95,7 +104,7 @@ func main() {
 	}
 
 	// *pushFlag 为 true（已与 -pull 互斥校验）
-	if err := pushLocalToRemote(cfgPath, strings.TrimSpace(*tableFlag), *forceFlag, accessKeyID, secret, *dryRunFlag); err != nil {
+	if err := pushLocalToRemote(cfgPath, normalizedTableTarget, strings.TrimSpace(*instancesFlag), *forceFlag, accessKeyID, secret, *dryRunFlag); err != nil {
 		log.Fatalf("[sync_tables] 推送失败：%v", err)
 	}
 	log.Println("[sync_tables] 推送完成")
@@ -138,20 +147,21 @@ func printSyncTablesHelp() {
     按表名推送时：远程缺索引会自动 CreateIndex；若 -table 为索引名则只同步该索引。
     生效参数:
       -push       开启推送（必需）
-      -table      表名：同步表结构并补缺失索引；索引名：仅 CreateIndex 该索引
+      -table      表名：同步表结构并补缺失索引；索引名：仅 CreateIndex 该索引；传 "*" 表示全部表
       -force      推送前先删后建（危险操作）
+      -instance   仅推送指定实例（等价 -instances 的单值形式）
+      -instances  仅推送指定实例列表（逗号分隔）
       -dry-run    仅演练，不执行 DeleteTable/CreateTable/AddDefinedColumn/CreateIndex
       -config     指定本地 tables.yaml 路径
-    忽略参数:
-      -instances  在推送模式下不会使用
 
   [-pull 模式] 拉取 remote -> local
     生效参数:
       -pull       开启拉取（必需）
-      -table      仅拉取并替换同名表（拉取模式不支持按索引名）
+      -table      仅拉取并替换同名表（拉取模式不支持按索引名）；传 "*" 表示全部表
       -instance   指定单个实例（等价 -instances 的单值形式）
       -instances  指定要拉取的实例列表（逗号分隔）
       -regionId   地域 ID（如 cn-hangzhou）：本地 YAML 尚未含该实例 regionId 时用于连接并写回 YAML（空文件 + -instances 时常用；多实例未配置时共用此值）
+      -regionid   -regionId 的全小写别名
       -dry-run    不写文件，直接把生成 YAML 输出到 stdout
       -config     指定要写入（或预览目标）的本地 tables.yaml 路径
     拉取合并规则:
@@ -171,17 +181,22 @@ func printSyncTablesHelp() {
   go run ./cmd/sync_tables -push
   go run ./cmd/sync_tables -push -dry-run
   go run ./cmd/sync_tables -push -table task_log
+  go run ./cmd/sync_tables -push -table "*" -instances tec05
   go run ./cmd/sync_tables -push -table task_log_index_level
   go run ./cmd/sync_tables -pull -table user
+  go run ./cmd/sync_tables -pull -table "*" -instance tec05
   go run ./cmd/sync_tables -pull -dry-run > preview.yaml
 `)
 }
 
 // pushLocalToRemote 执行“本地 -> 远程”同步（建表）。
-func pushLocalToRemote(cfgPath, targetTable string, force bool, accessKeyID, secret string, dryRun bool) error {
+func pushLocalToRemote(cfgPath, targetTable, instancesArg string, force bool, accessKeyID, secret string, dryRun bool) error {
 	log.Println("[sync_tables] 模式：推送（local -> remote）")
 	if targetTable != "" {
 		log.Printf("[sync_tables] 指定表：%s", targetTable)
+	}
+	if strings.TrimSpace(instancesArg) != "" {
+		log.Printf("[sync_tables] 指定实例：%s", instancesArg)
 	}
 	if force {
 		log.Println("[sync_tables] 强制模式：已存在的表将被删除后重建")
@@ -203,9 +218,28 @@ func pushLocalToRemote(cfgPath, targetTable string, force bool, accessKeyID, sec
 	}
 
 	byInstance := groupTablesByInstance(tablesCfg.Tables)
+	selectedInstances := resolveInstances(tablesCfg.Tables, instancesArg)
+	selectedSet := make(map[string]bool, len(selectedInstances))
+	for _, in := range selectedInstances {
+		selectedSet[in] = true
+	}
+	if len(selectedInstances) > 0 {
+		missing := make([]string, 0)
+		for _, in := range selectedInstances {
+			if _, ok := byInstance[in]; !ok {
+				missing = append(missing, in)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("实例不存在于本地 tables.yaml: %s", strings.Join(missing, ","))
+		}
+	}
 	instances := sortedInstanceKeys(byInstance)
 	matchedTables := 0
 	for _, instanceName := range instances {
+		if len(selectedSet) > 0 && !selectedSet[instanceName] {
+			continue
+		}
 		tables := byInstance[instanceName]
 		log.Printf("[sync_tables] ---------- 实例 %s（%d 张表）----------", instanceName, len(tables))
 
@@ -240,6 +274,15 @@ func pushLocalToRemote(cfgPath, targetTable string, force bool, accessKeyID, sec
 		return fmt.Errorf("未找到表或索引: %s", targetTable)
 	}
 	return nil
+}
+
+// normalizeTableTarget 归一化 -table 参数：空串或 "*" 都表示“全部表”。
+func normalizeTableTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "*" {
+		return ""
+	}
+	return target
 }
 
 // resolveIndexSyncTasks 判断 -table 是否命中索引名，并生成索引同步任务列表。
@@ -421,10 +464,15 @@ func pullOneInstanceTables(client *tablestore.TableStoreClient, instanceName, re
 
 // convertDescribeToYAMLTable 将 DescribeTable 响应转换为 YAML 表结构。
 func convertDescribeToYAMLTable(instanceName, regionID string, desc *tablestore.DescribeTableResponse) config.TableConfig {
+	dataLifeCycle := int64(-1)
+	if desc.TableOption != nil {
+		dataLifeCycle = int64(desc.TableOption.TimeToAlive)
+	}
 	table := config.TableConfig{
 		Name:           desc.TableMeta.TableName,
 		InstanceName:   instanceName,
 		RegionId:       strings.TrimSpace(regionID),
+		DataLifeCycle:  &dataLifeCycle,
 		PrimaryKeys:    make([]config.PrimaryKey, 0, len(desc.TableMeta.SchemaEntry)),
 		DefinedColumns: make([]config.DefinedColumn, 0, len(desc.TableMeta.DefinedColumns)),
 		Indexes:        make([]config.Index, 0, len(desc.IndexMetas)),
@@ -798,11 +846,12 @@ func createTableFromYAML(client *tablestore.TableStoreClient, tc config.TableCon
 	req := &tablestore.CreateTableRequest{
 		TableMeta: tableMeta,
 		TableOption: &tablestore.TableOption{
-			TimeToAlive: -1,
+			TimeToAlive: resolveTableDataLifeCycle(tc),
 			MaxVersion:  1,
 		},
 		ReservedThroughput: &tablestore.ReservedThroughput{Readcap: 0, Writecap: 0},
 	}
+	log.Printf("[sync_tables]     数据生命周期: %d 秒（-1 表示永不过期）", resolveTableDataLifeCycle(tc))
 
 	for _, idx := range tc.Indexes {
 		im := &tablestore.IndexMeta{IndexName: idx.Name}
@@ -821,6 +870,14 @@ func createTableFromYAML(client *tablestore.TableStoreClient, tc config.TableCon
 
 	_, err := client.CreateTable(req)
 	return err
+}
+
+// resolveTableDataLifeCycle 解析主表数据生命周期（秒），默认 -1（永不过期）。
+func resolveTableDataLifeCycle(tc config.TableConfig) int {
+	if tc.DataLifeCycle == nil {
+		return -1
+	}
+	return int(*tc.DataLifeCycle)
 }
 
 // syncOneIndexDryRun 索引同步演练：不实际调用 CreateIndex，仅校验与远程状态检查。

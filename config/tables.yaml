@@ -2,6 +2,7 @@ tables:
 - name: request_logs
   instanceName: bigots
   regionId: cn-hangzhou
+  dataLifeCycle: -1
   primaryKeys:
   - name: yyyymmddhh
     type: INTEGER
@@ -35,6 +36,7 @@ tables:
 - name: server_log
   instanceName: bigots
   regionId: cn-hangzhou
+  dataLifeCycle: -1
   primaryKeys:
   - name: yyyymmddhh
     type: INTEGER
@@ -60,6 +62,7 @@ tables:
 - name: task_log
   instanceName: bigots
   regionId: cn-hangzhou
+  dataLifeCycle: -1
   primaryKeys:
   - name: task_id
     type: STRING
