@@ -85,7 +85,16 @@ func defaultDeleteRowCondition(cond *tablestore.RowCondition) *tablestore.RowCon
 // assemblePutRowChangeFromMap 根据一行数据构建 PutRowChange：按 tables.yaml 解析主键、*_json 编码、剥离主键列后写入属性列。
 // cond 为 nil 时使用 RowExistenceExpectation_IGNORE（与旧版 PutRow 默认一致）。
 func (op *SimpleTableOperator) assemblePutRowChangeFromMap(row map[string]interface{}, cond *tablestore.RowCondition) (*tablestore.PutRowChange, error) {
-	// 构建主键
+	return op.assemblePutRowChangeFromMapWithPKNames(row, cond, nil)
+}
+
+// assemblePutRowChangeFromMapWithPKNames 与 assemblePutRowChangeFromMap 相同，但可传入已构建的主键列名集合。
+// 批量写入时对每一行复用同一 pkNames，避免重复分配 map、降低 GC 压力。
+// pkNames 为 nil 时在函数内调用 primaryKeyNameSet()，行为与 assemblePutRowChangeFromMap 完全一致。
+func (op *SimpleTableOperator) assemblePutRowChangeFromMapWithPKNames(row map[string]interface{}, cond *tablestore.RowCondition, pkNames map[string]bool) (*tablestore.PutRowChange, error) {
+	if pkNames == nil {
+		pkNames = op.primaryKeyNameSet()
+	}
 	pk, err := op.buildPrimaryKey(row)
 	if err != nil {
 		return nil, err
@@ -95,7 +104,6 @@ func (op *SimpleTableOperator) assemblePutRowChangeFromMap(row map[string]interf
 	if err := encodeJSONSuffixColumnsInMap(rowOTS); err != nil {
 		return nil, err
 	}
-	pkNames := op.primaryKeyNameSet()
 	ch := &tablestore.PutRowChange{
 		TableName:  op.tableName,
 		PrimaryKey: pk,

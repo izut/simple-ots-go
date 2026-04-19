@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -21,7 +22,7 @@ type TableConfig struct {
 }
 
 // SimpleTableOperator 绑定单张表与 TableStore 客户端，行级 API 命名与官方一致：
-// GetRow（列裁剪 + MaxVersion）/ PutRow（可传 RowCondition，默认 ReturnType=RT_PK，返回 PutRowResponse）/ UpdateRow（UpdateData：Put + 可选删列/自增，可传 RowCondition，返回 UpdateRowResponse）/ DeleteRow（返回 DeleteRowResponse）、BatchGetRows（列裁剪，MaxVersion 固定 1）/ BatchPutRows（全行共用 Condition + ReturnType）/ BatchWriteChanges。
+// GetRow（列裁剪 + MaxVersion）/ PutRow（可传 RowCondition，默认 ReturnType=RT_PK，返回 PutRowResponse）/ UpdateRow（UpdateData：Put + 可选删列/自增，可传 RowCondition，返回 UpdateRowResponse）/ DeleteRow（返回 DeleteRowResponse）、BatchGetRows（列裁剪，MaxVersion 固定 1）/ BatchPutRows（全行共用 Condition + ReturnType，返回 *BatchWriteRowResponse）/ BatchWriteChanges。
 type SimpleTableOperator struct {
 	tableName string
 	client    *tablestore.TableStoreClient
@@ -88,37 +89,32 @@ func RegisterTable(tableConfig *TableConfig) {
 
 // getClient 获取指定实例的客户端（带缓存）。
 // 缓存键包含 instanceName + endpoint + accessKey 指纹，避免相同实例名但不同凭证/endpoint 时返回错误客户端。
-func getClient(instanceName, endpoint, accessKey, secretKey string) (*tablestore.TableStoreClient, error) {
+func getClient(instanceName, endpoint, accessKey, secretKey string) *tablestore.TableStoreClient {
 	cacheKey := buildClientCacheKey(instanceName, endpoint, accessKey)
 
-	// 读锁检查缓存
 	clientsMu.RLock()
 	client, exists := clients[cacheKey]
 	clientsMu.RUnlock()
 
 	if exists {
-		return client, nil
+		return client
 	}
 
-	// 写锁创建客户端
 	clientsMu.Lock()
 	defer clientsMu.Unlock()
 
-	// 双重检查
-	if client, exists := clients[cacheKey]; exists {
-		return client, nil
+	if c, ok := clients[cacheKey]; ok {
+		return c
 	}
 
-	// 创建新客户端
 	client = tablestore.NewClient(
 		endpoint,
 		instanceName,
 		accessKey,
 		secretKey,
 	)
-
 	clients[cacheKey] = client
-	return client, nil
+	return client
 }
 
 // buildClientCacheKey 构建客户端缓存键。
@@ -149,11 +145,8 @@ func Table(tableName, endpoint, accessKey, secretKey string) (*SimpleTableOperat
 		return operator, nil
 	}
 
-	// 3. 获取对应实例的客户端
-	client, err := getClient(tableConfig.InstanceName, endpoint, accessKey, secretKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get client for instance %s: %w", tableConfig.InstanceName, err)
-	}
+	// 3. 获取对应实例的客户端（纯内存缓存，当前实现不会失败）
+	client := getClient(tableConfig.InstanceName, endpoint, accessKey, secretKey)
 
 	// 4. 创建新的操作器
 	operatorsMu.Lock()
@@ -187,6 +180,26 @@ func (op *SimpleTableOperator) buildPrimaryKey(data map[string]interface{}) (*ta
 		}
 	}
 	return pk, nil
+}
+
+// preparePrimaryKeyAndEncodedNonPKColumns 从整行 map 解析主键，并生成「非主键列、*_json 已编码」的属性 map，供 Update 类路径复用。
+// pkNames 可由调用方一次性构建并在批量循环中传入；为 nil 时在函数内调用 primaryKeyNameSet()。
+func (op *SimpleTableOperator) preparePrimaryKeyAndEncodedNonPKColumns(row map[string]interface{}, pkNames map[string]bool) (*tablestore.PrimaryKey, map[string]interface{}, error) {
+	if pkNames == nil {
+		pkNames = op.primaryKeyNameSet()
+	}
+	pk, err := op.buildPrimaryKey(row)
+	if err != nil {
+		return nil, nil, err
+	}
+	attrs := shallowCopyMap(row)
+	for col := range pkNames {
+		delete(attrs, col)
+	}
+	if err := encodeJSONSuffixColumnsInMap(attrs); err != nil {
+		return nil, nil, err
+	}
+	return pk, attrs, nil
 }
 
 // normalizePrimaryKeyValue 将常见的 Go 整型归一化为 int64，避免 OTS SDK 在构造主键时因 int 类型触发 invalid input（与属性列写入共用 normalizeIntegerToInt64）。
@@ -274,9 +287,9 @@ type BatchWriteAction struct {
 // 支持 Put / Update / Delete 三种操作，支持条件控制；返回官方 SDK 的 BatchWriteRowResponse.TableToRowsResult（含每行结果、CU、错误详情等）。
 // 不再返回ReqeustId, tablestoreV5中似乎已删除ReturnType, 不再返回PrimaryKey
 func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]tablestore.RowResult, error) {
-	batchRequest := &tablestore.BatchWriteRowRequest{
-		RowChangesGroupByTable: make(map[string][]tablestore.RowChange),
-	}
+	total := len(actions.PutRows) + len(actions.UpdateRows) + len(actions.DeleteRows)
+	// 预分配切片长度，避免对同一表键反复 append 触发多次扩容；最后一次性挂到请求上。
+	rowChanges := make([]tablestore.RowChange, 0, total)
 	pkNames := op.primaryKeyNameSet()
 
 	putCond := defaultPutRowCondition(actions.PutCond)
@@ -284,37 +297,29 @@ func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]table
 	deleteCond := defaultDeleteRowCondition(actions.DeleteCond)
 
 	for _, row := range actions.PutRows {
-		putRowChange, err := op.assemblePutRowChangeFromMap(row, putCond)
+		putRowChange, err := op.assemblePutRowChangeFromMapWithPKNames(row, putCond, pkNames)
 		if err != nil {
 			return nil, err
 		}
-		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], putRowChange)
+		rowChanges = append(rowChanges, putRowChange)
 	}
 	for _, row := range actions.UpdateRows {
-		pk, err := op.buildPrimaryKey(row)
+		pk, attrs, err := op.preparePrimaryKeyAndEncodedNonPKColumns(row, pkNames)
 		if err != nil {
 			return nil, err
 		}
-
 		updateRowChange := &tablestore.UpdateRowChange{
 			TableName:  op.tableName,
 			PrimaryKey: pk,
 			Condition:  updateCond,
 		}
-		updatesForOTS := shallowCopyMap(row)
-		for col := range pkNames {
-			delete(updatesForOTS, col)
-		}
-		if err := encodeJSONSuffixColumnsInMap(updatesForOTS); err != nil {
-			return nil, err
-		}
-		for colName, val := range updatesForOTS {
+		for colName, val := range attrs {
 			updateRowChange.PutColumn(colName, val)
 		}
 		if len(updateRowChange.Columns) == 0 {
 			return nil, fmt.Errorf("batch update row: row must contain at least one non-primary-key column")
 		}
-		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], updateRowChange)
+		rowChanges = append(rowChanges, updateRowChange)
 	}
 	for _, row := range actions.DeleteRows {
 		pk, err := op.buildPrimaryKey(row)
@@ -326,7 +331,12 @@ func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]table
 			PrimaryKey: pk,
 			Condition:  deleteCond,
 		}
-		batchRequest.RowChangesGroupByTable[op.tableName] = append(batchRequest.RowChangesGroupByTable[op.tableName], deleteRowChange)
+		rowChanges = append(rowChanges, deleteRowChange)
+	}
+	batchRequest := &tablestore.BatchWriteRowRequest{
+		RowChangesGroupByTable: map[string][]tablestore.RowChange{
+			op.tableName: rowChanges,
+		},
 	}
 	var resp *tablestore.BatchWriteRowResponse
 	err := withRetry(func() error {
@@ -340,7 +350,6 @@ func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]table
 	if resp == nil {
 		return nil, fmt.Errorf("batch write rows:响应为 nil")
 	}
-	want := len(actions.PutRows) + len(actions.UpdateRows) + len(actions.DeleteRows)
 	rowResults, ok := resp.TableToRowsResult[op.tableName]
 	if !ok {
 		return nil, fmt.Errorf("batch write rows: 响应中缺少表 %q 的 TableToRowsResult", op.tableName)
@@ -348,25 +357,33 @@ func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]table
 	if len(rowResults) == 0 {
 		return nil, fmt.Errorf("batch write rows: 表 %q 的 RowResult 列表为空", op.tableName)
 	}
-	if len(rowResults) != want {
-		return nil, fmt.Errorf("batch write rows: 期望 %d 条 RowResult，实际 %d 条", want, len(rowResults))
+	if len(rowResults) != total {
+		return nil, fmt.Errorf("batch write rows: 期望 %d 条 RowResult，实际 %d 条", total, len(rowResults))
 	}
 	return rowResults, nil
 }
 
 // UpdateRowWithMutation 使用 UpdateMutation 更新一行（Put / 删列 / 自增 / 按版本删列）。
-func (op *SimpleTableOperator) UpdateRowWithMutation(primaryKeys map[string]interface{}, mut *UpdateMutation, cond *tablestore.RowCondition) error {
-	pk, err := op.buildPrimaryKey(primaryKeys)
-	if err != nil {
-		return err
-	}
-	return op.tsClient().UpdateRowWithMutation(op.tableName, pk, mut, cond)
-}
+// func (op *SimpleTableOperator) UpdateRowWithMutation(primaryKeys map[string]interface{}, mut *UpdateMutation, cond *tablestore.RowCondition) error {
+// 	pk, err := op.buildPrimaryKey(primaryKeys)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return op.tsClient().UpdateRowWithMutation(op.tableName, pk, mut, cond)
+// }
 
 // GetRangeWithPrimaryKeys 使用有序主键边界范围扫描，支持 ColumnToGet、反向、Limit 与 next_start_pk 分页；返回官方 SDK 的 GetRangeResponse。
 // 将每行转为 map（含 *_json 解析）请对 resp.Rows 的元素调用 RowToMap。
-func (op *SimpleTableOperator) GetRangeWithPrimaryKeys(startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) (*tablestore.GetRangeResponse, error) {
-	return op.tsClient().GetRangeWithOptions(op.tableName, startPK, endPK, opts)
+func (op *SimpleTableOperator) GetRangeWithPrimaryKeys(startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) ([]map[string]interface{}, error) {
+	resp, err := op.tsClient().GetRangeWithOptions(op.tableName, startPK, endPK, opts)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]interface{}, 0, len(resp.Rows))
+	for _, row := range resp.Rows {
+		rows = append(rows, RowToMap(row))
+	}
+	return rows, nil
 }
 
 // PutRow 写入一行（与 TableStore PutRow 语义一致）。data 须含全部主键列；*_json 列会以 JSON 字符串形式写入。
@@ -407,10 +424,6 @@ func (op *SimpleTableOperator) UpdateRow(data UpdateData, cond *tablestore.RowCo
 	if data.RowData == nil {
 		return nil, fmt.Errorf("update row: RowData 不能为 nil，须包含完整主键列")
 	}
-	pk, err := op.buildPrimaryKey(data.RowData)
-	if err != nil {
-		return nil, err
-	}
 
 	effCond := cond
 	if effCond == nil {
@@ -419,22 +432,17 @@ func (op *SimpleTableOperator) UpdateRow(data UpdateData, cond *tablestore.RowCo
 		}
 	}
 
+	pk, attrs, err := op.preparePrimaryKeyAndEncodedNonPKColumns(data.RowData, nil)
+	if err != nil {
+		return nil, err
+	}
+
 	updateRowChange := &tablestore.UpdateRowChange{
 		TableName:  op.tableName,
 		PrimaryKey: pk,
 		Condition:  effCond,
 	}
-
-	// 从 RowData 中剥离主键列，仅对剩余属性列做 *_json 编码并 PutColumn。
-	pkNames := op.primaryKeyNameSet()
-	updatesForOTS := shallowCopyMap(data.RowData)
-	for col := range pkNames {
-		delete(updatesForOTS, col)
-	}
-	if err := encodeJSONSuffixColumnsInMap(updatesForOTS); err != nil {
-		return nil, err
-	}
-	for colName, val := range updatesForOTS {
+	for colName, val := range attrs {
 		updateRowChange.PutColumn(colName, val)
 	}
 	for _, col := range data.DeleteColumns {
@@ -499,25 +507,27 @@ func (op *SimpleTableOperator) DeleteRow(primaryKeys map[string]interface{}) (*t
 // BatchPutRows 批量 PutRow：每行 data 与 PutRow 相同（主键 + 属性列、*_json 编码）。
 // condition 为 nil 时每一行均使用与 PutRow(cond==nil) 相同的默认 IGNORE；非 nil 时**所有行共用同一条件**（行存在性期望、列条件等与单行 PutRow 一致）。
 // returnType 写入每一行 PutRowChange.ReturnType（全批量共用同一返回类型枚举）。
-// 返回值键为表名（当前实现仅包含本操作器绑定的表名），值为该行序对应的 []RowResult（含 IsSucceed / Error / Index / CU 等，与官方 SDK 一致）。
+// 成功时直接返回官方 SDK 的 *BatchWriteRowResponse，TableToRowsResult 键为表名（当前实现仅包含本操作器绑定的表名），值为该行序对应的 []RowResult。
 // 说明：部分 SDK 版本对 BatchWriteRow 响应中「返回行数据体」的解析较保守，RowResult 内 PrimaryKey/Columns 是否非空以所用 aliyun-tablestore-go-sdk 为准。
-func (op *SimpleTableOperator) BatchPutRows(rows []map[string]interface{}, condition *tablestore.RowCondition, returnType tablestore.ReturnType) (map[string][]tablestore.RowResult, error) {
+func (op *SimpleTableOperator) BatchPutRows(rows []map[string]interface{}, condition *tablestore.RowCondition, returnType tablestore.ReturnType) ([]tablestore.RowResult, error) {
+	// 无行时与旧行为一致：不发起 RPC，返回空结果映射，避免调用方对 nil map 做写入。
 	if len(rows) == 0 {
-		return map[string][]tablestore.RowResult{}, nil
+		return nil, nil
 	}
-	batchRequest := &tablestore.BatchWriteRowRequest{
-		RowChangesGroupByTable: make(map[string][]tablestore.RowChange),
-	}
+	pkNames := op.primaryKeyNameSet()
+	rowChanges := make([]tablestore.RowChange, 0, len(rows))
 	for _, row := range rows {
-		putRowChange, err := op.assemblePutRowChangeFromMap(row, condition)
+		putRowChange, err := op.assemblePutRowChangeFromMapWithPKNames(row, condition, pkNames)
 		if err != nil {
 			return nil, err
 		}
 		putRowChange.ReturnType = returnType
-		batchRequest.RowChangesGroupByTable[op.tableName] = append(
-			batchRequest.RowChangesGroupByTable[op.tableName],
-			putRowChange,
-		)
+		rowChanges = append(rowChanges, putRowChange)
+	}
+	batchRequest := &tablestore.BatchWriteRowRequest{
+		RowChangesGroupByTable: map[string][]tablestore.RowChange{
+			op.tableName: rowChanges,
+		},
 	}
 	var resp *tablestore.BatchWriteRowResponse
 	err := withRetry(func() error {
@@ -528,22 +538,27 @@ func (op *SimpleTableOperator) BatchPutRows(rows []map[string]interface{}, condi
 	if err != nil {
 		return nil, fmt.Errorf("batch put rows failed: %w", err)
 	}
-	if resp == nil || len(resp.TableToRowsResult) == 0 {
-		return map[string][]tablestore.RowResult{}, nil
+	// SDK 在成功路径下通常返回非 nil；若为 nil 则返回空结构，避免调用方解引用 panic。
+	if resp == nil {
+		return nil, nil
 	}
-	out := make(map[string][]tablestore.RowResult, len(resp.TableToRowsResult))
-	for k, v := range resp.TableToRowsResult {
-		cp := make([]tablestore.RowResult, len(v))
-		copy(cp, v)
-		out[k] = cp
+	rowResults, ok := resp.TableToRowsResult[op.tableName]
+	if !ok {
+		return nil, fmt.Errorf("batch put rows: 响应中缺少表 %q 的 TableToRowsResult", op.tableName)
 	}
-	return out, nil
+	if len(rowResults) == 0 {
+		return nil, fmt.Errorf("batch put rows: 表 %q 的 RowResult 列表为空", op.tableName)
+	}
+	if len(rowResults) != len(rows) {
+		return nil, fmt.Errorf("batch put rows: 期望 %d 条 RowResult，实际 %d 条", len(rows), len(rowResults))
+	}
+	return rowResults, nil
 }
 
 // GetRange 范围查询（前闭后开等行为以 OTS 文档为准）。
 // 会按 tables.yaml 中主键顺序构建边界，并支持将 simpleotsgo.INF_MIN/INF_MAX 作为范围主键值。
 // 直接返回官方 SDK 的 *tablestore.GetRangeResponse，便于调用方读取 NextStartPrimaryKey 等原始分页信息。
-func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, direction tablestore.Direction, limit int32) (*tablestore.GetRangeResponse, error) {
+func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, direction tablestore.Direction, limit int32) ([]map[string]interface{}, error) {
 	if direction != tablestore.FORWARD && direction != tablestore.BACKWARD {
 		return nil, fmt.Errorf("invalid range direction: %v", direction)
 	}
@@ -582,7 +597,11 @@ func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, d
 	if err != nil {
 		return nil, fmt.Errorf("get range failed: %w", err)
 	}
-	return resp, nil
+	rows := make([]map[string]interface{}, 0, len(resp.Rows))
+	for _, row := range resp.Rows {
+		rows = append(rows, RowToMap(row))
+	}
+	return rows, nil
 }
 
 // GetTableName 获取表名
@@ -608,6 +627,7 @@ func GetAllRegisteredTables() []string {
 	for tableName := range tableConfigs {
 		tables = append(tables, tableName)
 	}
+	slices.Sort(tables)
 	return tables
 }
 

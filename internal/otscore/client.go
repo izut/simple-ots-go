@@ -287,7 +287,7 @@ func (c *Client) DeleteRow(table string, primaryKey map[string]interface{}) erro
 //
 // Deprecated: 该方法将每行 map 中第一个遍历到的键值对视为主键，但 Go map 遍历顺序不确定，
 // 联合主键场景下行为不可预测。请使用 SimpleTableOperator.BatchPutRows(rows, condition, returnType)，它会根据 tables.yaml
-// 中定义的主键列顺序正确构建主键，并返回 BatchWriteRow 的 RowResult 映射。
+// 中定义的主键列顺序正确构建主键，并返回 *tablestore.BatchWriteRowResponse。
 func (c *Client) BatchPutRow(table string, rows []map[string]interface{}) error {
 	batchWriteRowRequest := &tablestore.BatchWriteRowRequest{
 		RowChangesGroupByTable: make(map[string][]tablestore.RowChange),
