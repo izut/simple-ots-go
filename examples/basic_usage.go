@@ -119,22 +119,20 @@ func (t *TaskLogTable) GetRangeExample() {
 		"task_id":   sog.INF_MAX,
 		"timestamp": sog.INF_MAX,
 	}
-	getRangeRsult, err := t.Conn.GetRange(spk, epk, sog.FORWARD, 20)
+	// GetRange 返回 (CU, 下一页起始主键 map, 已解码行 map 列表, error)；行数据已含 *_json 解析，无需再调 RowToMap。
+	cu, nextStartPKMap, rows, err := t.Conn.GetRange(spk, epk, sog.FORWARD, 20)
 	if err != nil {
 		panic(err)
 	}
 
-	rows := getRangeRsult.Rows
-	fmt.Printf("读取结果: %+v\n", rows)
+	fmt.Printf("读取结果: 共 %d 行\n", len(rows))
 	for _, row := range rows {
-		PrintRow(sog.RowToMap(row))
+		PrintRow(row)
 	}
-	nextStartPrimaryKey := getRangeRsult.NextStartPrimaryKey
-	fmt.Printf("下一个主键[PrimaryKey]: %+v\n", nextStartPrimaryKey)
-	fmt.Printf("下一个主键[map]: %+v\n", sog.PrimaryKeyToMap(nextStartPrimaryKey))
-	cu := getRangeRsult.ConsumedCapacityUnit
-	fmt.Printf("读消耗: %d，写消耗: %d\n", cu.Read, cu.Write)
-	fmt.Printf("请求ID: %s\n", getRangeRsult.ResponseInfo.RequestId)
+	fmt.Printf("下一页起始主键(map，续扫传入 GetRange 的 startPK): %+v\n", nextStartPKMap)
+	if cu != nil {
+		fmt.Printf("读消耗: %d，写消耗: %d\n", cu.Read, cu.Write)
+	}
 
 	fmt.Print("获取范围测试结束\n---------------------------GetRange Example--------------------------------------------------------------END\n\n")
 }
@@ -184,11 +182,19 @@ func (t *TaskLogTable) BatchPutRowsExample() {
 			"status":    "completed",
 		},
 	}
-	batchWriteResult, err := t.Conn.BatchPutRows(put_rows, sog.IGNORE, tablestore.ReturnType_RT_NONE)
+	// BatchPutRows 返回当前表上的 []tablestore.RowResult（与提交行顺序一致），与 BatchWriteRows 的 RowResult 语义相同。
+	rowResults, err := t.Conn.BatchPutRows(put_rows, sog.IGNORE, tablestore.ReturnType_RT_NONE)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("批量写入成功", batchWriteResult)
+	if rowResults == nil {
+		fmt.Println("批量写入: 无行写入时结果为 nil")
+	} else {
+		fmt.Printf("批量写入成功，共 %d 条 RowResult\n", len(rowResults))
+		for i, rr := range rowResults {
+			fmt.Printf("  [%d] IsSucceed=%v Error=%v Index=%d\n", i, rr.IsSucceed, rr.Error, rr.Index)
+		}
+	}
 	fmt.Print("批量写入测试结束\n---------------------------BatchPutRows Example--------------------------------------------------------------END\n\n")
 }
 
@@ -220,7 +226,7 @@ func (t *TaskLogTable) BatchWriteRowsExample() {
 		DeleteCond: sog.IGNORE,
 	}
 
-	// BatchWriteRows 返回 BatchWriteRowResponse，可用于查看每行执行结果；此处仅校验整体错误。
+	// BatchWriteRows 返回当前表上的 []tablestore.RowResult（与 Put/Update/Delete 提交顺序一致）。
 	rowResults, err := t.Conn.BatchWriteRows(batchWriteAction)
 	if err != nil {
 		panic(err)
