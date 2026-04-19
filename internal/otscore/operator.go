@@ -374,16 +374,16 @@ func (op *SimpleTableOperator) BatchWriteRows(actions BatchWriteAction) ([]table
 
 // GetRangeWithPrimaryKeys 使用有序主键边界范围扫描，支持 ColumnToGet、反向、Limit 与 next_start_pk 分页；返回官方 SDK 的 GetRangeResponse。
 // 将每行转为 map（含 *_json 解析）请对 resp.Rows 的元素调用 RowToMap。
-func (op *SimpleTableOperator) GetRangeWithPrimaryKeys(startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) ([]map[string]interface{}, error) {
+func (op *SimpleTableOperator) GetRangeWithPrimaryKeys(startPK, endPK *tablestore.PrimaryKey, opts *GetRangeOptions) (*tablestore.ConsumedCapacityUnit, *tablestore.PrimaryKey, []map[string]interface{}, error) {
 	resp, err := op.tsClient().GetRangeWithOptions(op.tableName, startPK, endPK, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	rows := make([]map[string]interface{}, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
 		rows = append(rows, RowToMap(row))
 	}
-	return rows, nil
+	return resp.ConsumedCapacityUnit, resp.NextStartPrimaryKey, rows, nil
 }
 
 // PutRow 写入一行（与 TableStore PutRow 语义一致）。data 须含全部主键列；*_json 列会以 JSON 字符串形式写入。
@@ -557,22 +557,22 @@ func (op *SimpleTableOperator) BatchPutRows(rows []map[string]interface{}, condi
 
 // GetRange 范围查询（前闭后开等行为以 OTS 文档为准）。
 // 会按 tables.yaml 中主键顺序构建边界，并支持将 simpleotsgo.INF_MIN/INF_MAX 作为范围主键值。
-// 直接返回官方 SDK 的 *tablestore.GetRangeResponse，便于调用方读取 NextStartPrimaryKey 等原始分页信息。
-func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, direction tablestore.Direction, limit int32) ([]map[string]interface{}, error) {
+// 返回ConsumedCapacityUnit *tablestore.ConsumedCapacityUnit, NextStartPrimaryKey map[string]interface{}, Rows []map[string]interface{}, error
+func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, direction tablestore.Direction, limit int32) (*tablestore.ConsumedCapacityUnit, map[string]interface{}, []map[string]interface{}, error) {
 	if direction != tablestore.FORWARD && direction != tablestore.BACKWARD {
-		return nil, fmt.Errorf("invalid range direction: %v", direction)
+		return nil, nil, nil, fmt.Errorf("invalid range direction: %v", direction)
 	}
 	if startPK == nil || endPK == nil {
-		return nil, fmt.Errorf("startPK and endPK are required")
+		return nil, nil, nil, fmt.Errorf("startPK and endPK are required")
 	}
 	// 按表配置中的主键顺序构建范围边界，避免直接遍历 map 导致联合主键顺序不稳定。
 	startPrimaryKey, err := op.buildPrimaryKey(startPK)
 	if err != nil {
-		return nil, fmt.Errorf("invalid start primary key: %w", err)
+		return nil, nil, nil, fmt.Errorf("invalid start primary key: %w", err)
 	}
 	endPrimaryKey, err := op.buildPrimaryKey(endPK)
 	if err != nil {
-		return nil, fmt.Errorf("invalid end primary key: %w", err)
+		return nil, nil, nil, fmt.Errorf("invalid end primary key: %w", err)
 	}
 
 	criteria := &tablestore.RangeRowQueryCriteria{
@@ -595,13 +595,13 @@ func (op *SimpleTableOperator) GetRange(startPK, endPK map[string]interface{}, d
 		return innerErr
 	})
 	if err != nil {
-		return nil, fmt.Errorf("get range failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("get range failed: %w", err)
 	}
 	rows := make([]map[string]interface{}, 0, len(resp.Rows))
 	for _, row := range resp.Rows {
 		rows = append(rows, RowToMap(row))
 	}
-	return rows, nil
+	return resp.ConsumedCapacityUnit, PrimaryKeyToMap(resp.NextStartPrimaryKey), rows, nil
 }
 
 // GetTableName 获取表名
