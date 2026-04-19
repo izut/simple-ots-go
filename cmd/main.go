@@ -65,20 +65,19 @@ func main() {
 
 	// fmt.Println(taskLog)
 
-	resp, err := taskLog.GetRange(map[string]interface{}{
+	// GetRange 返回 (CU, 下一页起始主键 map, 已解码行 map 列表, error)。
+	_, _, rows, err := taskLog.GetRange(map[string]interface{}{
 		"task_id":   "123",
 		"timestamp": sog.INF_MIN,
 	}, map[string]interface{}{
 		"task_id":   "123",
 		"timestamp": sog.INF_MAX,
 	}, sog.FORWARD, 10)
-	// fmt.Printf("rows: %+v\n", resp.Rows)
 	if err != nil {
 		panic(err)
 	}
-	for _, row := range resp.Rows {
+	for _, row := range rows {
 		fmt.Printf("row: %+v\n", row)
-		// rowData := simpleotsgo.RowToMap(row)
 	}
 
 }
