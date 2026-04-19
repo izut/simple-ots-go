@@ -73,6 +73,7 @@ func main() {
 		"task_id":   "123",
 		"timestamp": sog.INF_MAX,
 	}, sog.FORWARD, 10)
+
 	if err != nil {
 		panic(err)
 	}
